@@ -1,0 +1,36 @@
+# Computes real KAST from a match demo already attached to this repo's
+# releases (see README) and submits it to the league database through a
+# narrow, dedicated-secret RPC pair — never a database key. Triggered by the
+# league's webhook (repository_dispatch: compute-kast) once a demo is secured.
+# Idempotent: recomputing overwrites the same values.
+name: compute-kast
+on:
+  repository_dispatch:
+    types: [compute-kast]
+permissions:
+  contents: read
+concurrency:
+  group: kast-${{ github.event.client_payload.tag }}-${{ github.event.client_payload.asset }}
+  cancel-in-progress: true
+jobs:
+  kast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch demo from this repo's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.client_payload.tag }}
+          ASSET: ${{ github.event.client_payload.asset }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET" --output demo.dem
+      - name: Compute + submit KAST
+        env:
+          SUPABASE_URL: https://mbnnwcqmcrladolrilsr.supabase.co
+          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ibm53Y3FtY3JsYWRvbHJpbHNyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3OTMxNTcsImV4cCI6MjA5NTM2OTE1N30.M0lGheblSiy74yqmJ_O5tfYp86U7nYOuglCHGjXrf6Y
+          KAST_SECRET: ${{ secrets.KAST_SECRET }}
+          MATCH: ${{ github.event.client_payload.match }}
+          MAP: ${{ github.event.client_payload.map }}
+        run: |
+          pip -q install demoparser2 pandas
+          python3 tools/kast_ci.py "$MATCH" "$MAP" demo.dem
