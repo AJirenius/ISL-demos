@@ -1,0 +1,50 @@
+# Backstop for MatchZy's fire-once demo upload: dathost-webhook fires a
+# repository_dispatch (~1 KB) when a demo is missing from its match release;
+# this runner pulls the .dem from DatHost's file API and attaches it.
+# Idempotent: exits early when the asset already exists, so repeat dispatches
+# are harmless. DatHost credentials live as this repo's Actions secrets
+# (DATHOST_EMAIL / DATHOST_PASSWORD) — NEVER in the dispatch payload, which is
+# visible on a public repo.
+name: ingest-demo
+on:
+  repository_dispatch:
+    types: [ingest-demo]
+permissions:
+  contents: write
+concurrency:
+  group: ingest-${{ github.event.client_payload.tag }}-${{ github.event.client_payload.asset }}
+  cancel-in-progress: false
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Pull demo from DatHost and attach to release
+        env:
+          DATHOST_EMAIL: ${{ secrets.DATHOST_EMAIL }}
+          DATHOST_PASSWORD: ${{ secrets.DATHOST_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          set -euo pipefail
+          server_id=$(jq -r .server_id <<<"$PAYLOAD")
+          path=$(jq -r .path <<<"$PAYLOAD")
+          tag=$(jq -r .tag <<<"$PAYLOAD")
+          asset=$(jq -r .asset <<<"$PAYLOAD")
+          echo "ingest $asset from server $server_id ($path) -> release $tag"
+          if [ -z "$DATHOST_EMAIL" ] || [ -z "$DATHOST_PASSWORD" ]; then
+            echo "::error::DATHOST_EMAIL / DATHOST_PASSWORD repo secrets are not set"; exit 1; fi
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --notes "created by ingest backstop" --latest=false
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qxF "$asset"; then
+            echo "asset already present — nothing to do"; exit 0; fi
+          enc=$(python3 -c "import urllib.parse,sys; print('/'.join(urllib.parse.quote(s) for s in sys.argv[1].split('/')))" "$path")
+          # DatHost file GET has no documented Range support: whole-file, 3 tries
+          for i in 1 2 3; do
+            curl -sf -u "$DATHOST_EMAIL:$DATHOST_PASSWORD" -o "$asset" \
+              "https://dathost.net/api/0.1/game-servers/$server_id/files/$enc" && break
+            echo "download attempt $i failed"; sleep 20; [ "$i" = 3 ] && exit 1
+          done
+          ls -la "$asset"
+          gh release upload "$tag" "$asset" --repo "$GITHUB_REPOSITORY"
+          echo "uploaded."
