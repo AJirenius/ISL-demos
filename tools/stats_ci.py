@@ -10,7 +10,9 @@ utility_thrown / kills_with_sniper / kills_with_pistol at all. On top of the
 dead family this pass mines the demo for flavour stats no server plugin has:
 team_damage, last_alive (rounds as the team's last one standing), blind /
 smoke / wallbang / noscope / airborne kills, longest_kill_m (max kill
-distance, metres), cash_spent (total_cash_spent prop at the last death). The demo has
+distance, metres), cash_spent (total_cash_spent prop at the last death),
+per-type utility: flashes/smokes/molotovs/he/decoys thrown, plus he_damage and
+fire_damage (enemy HP by HE grenades / molotov+incendiary burn). The demo has
 all of it. Keys MatchZy DOES track live (kills, deaths, damage,
 utility_damage, enemies_flashed, headshot_kills, mvp, multikills, 1vX) are
 deliberately not computed here — the demo pass must never fight the live
@@ -132,6 +134,8 @@ def main():
     plants = Z(); defuses = Z(); util = Z(); ff_flash = Z(); ef_flash = Z()
     blindk = Z(); smokek = Z(); wallk = Z(); nsk = Z(); airk = Z()
     tdmg = Z(); last_alive = Z(); longest = Z(); cash = Z()
+    fl_t = Z(); sm_t = Z(); mo_t = Z(); he_t = Z(); de_t = Z()
+    he_dmg = Z(); fire_dmg = Z()
 
     def enemy_kill(r):
         a, v = r["attacker"], r["victim"]
@@ -183,12 +187,21 @@ def main():
             if mine is None or mine > max(mate_ticks):
                 last_alive[sid] += 1
 
-    # team damage (player_hurt: teammate on teammate, self excluded)
+    # player_hurt pass: team damage (teammate on teammate, self excluded) +
+    # per-type utility damage on ENEMIES (HE blast; molotov/incendiary burn
+    # arrives as weapon "inferno" once the ground is lit)
+    FIRE = {"molotov", "incgrenade", "inferno"}
     for d in evt("player_hurt"):
         if not (1 <= round_of(int(d["tick"])) <= n): continue
         a, v = col(d, "attacker_steamid"), col(d, "user_steamid")
-        if a in team_of and v in team_of and a != v and team_of[a] == team_of[v]:
-            tdmg[a] += int(d.get("dmg_health") or 0)
+        if not (a in team_of and v in team_of and a != v): continue
+        dmg = int(d.get("dmg_health") or 0)
+        if team_of[a] == team_of[v]:
+            tdmg[a] += dmg
+        else:
+            w = wname(d.get("weapon"))
+            if w == "hegrenade": he_dmg[a] += dmg
+            elif w in FIRE:      fire_dmg[a] += dmg
 
     # money spent — the total_cash_spent player prop sampled at the last death
     if deaths:
@@ -221,11 +234,17 @@ def main():
                 sid = col(d, "user_steamid")
                 if sid in acc: acc[sid] += 1
 
-    # grenades thrown
+    # grenades thrown — total + per type
+    PER_TYPE = {"flashbang": fl_t, "smokegrenade": sm_t, "molotov": mo_t,
+                "incgrenade": mo_t, "hegrenade": he_t, "decoy": de_t}
     for d in evt("weapon_fire"):
-        if wname(d.get("weapon")) in GRENADES and 1 <= round_of(int(d["tick"])) <= n:
+        w = wname(d.get("weapon"))
+        if w in GRENADES and 1 <= round_of(int(d["tick"])) <= n:
             sid = col(d, "user_steamid")
-            if sid in util: util[sid] += 1
+            if sid in util:
+                util[sid] += 1
+                acc = PER_TYPE.get(w)
+                if acc is not None: acc[sid] += 1
 
     # blinds — friendlies_flashed is submitted; enemies_flashed printed only
     # (MatchZy tracks it live; the print is a standing calibration check).
@@ -255,14 +274,15 @@ def main():
     print(f"match {match_id} map {map_num} — {n} rounds")
     print(f"  {'player':<16}{'kast':>5}{'tr':>4}{'fk':>4}{'fd':>4}{'pl':>4}{'df':>4}"
           f"{'kn':>4}{'awp':>4}{'pst':>4}{'fa':>4}{'ffl':>4}{'efl*':>5}{'tk':>4}{'sui':>4}{'utl':>5}"
-          f"{'bld':>4}{'smk':>4}{'wb':>4}{'ns':>4}{'air':>4}{'la':>4}{'tdm':>5}{'lng':>5}{'cash':>7}")
+          f"{'bld':>4}{'smk':>4}{'wb':>4}{'ns':>4}{'air':>4}{'la':>4}{'tdm':>5}{'lng':>5}{'cash':>7}{'fl/sm/mo/he/de':>16}{'hed':>5}{'fird':>5}")
     for sid, pl in sorted(by_steam.items(), key=lambda x: -kast[x[0]]):
         print(f"  {pl['alias']:<16}{kast[sid]:>5}{trades[sid]:>4}"
               f"{fk_ct[sid]+fk_t[sid]:>4}{fd_ct[sid]+fd_t[sid]:>4}"
               f"{plants[sid]:>4}{defuses[sid]:>4}{knife[sid]:>4}{sniper[sid]:>4}{pistol[sid]:>4}"
               f"{fassist[sid]:>4}{ff_flash[sid]:>4}{ef_flash[sid]:>5}{tk[sid]:>4}{suicides[sid]:>4}{util[sid]:>5}"
               f"{blindk[sid]:>4}{smokek[sid]:>4}{wallk[sid]:>4}{nsk[sid]:>4}{airk[sid]:>4}"
-              f"{last_alive[sid]:>4}{tdmg[sid]:>5}{round(longest[sid]):>5}{cash[sid]:>7}")
+              f"{last_alive[sid]:>4}{tdmg[sid]:>5}{round(longest[sid]):>5}{cash[sid]:>7}"
+              f"{f'{fl_t[sid]}/{sm_t[sid]}/{mo_t[sid]}/{he_t[sid]}/{de_t[sid]}':>16}{he_dmg[sid]:>5}{fire_dmg[sid]:>5}")
     print("  (* efl = demo-computed enemies_flashed, print-only — MatchZy owns that key)")
 
     payload = [{
@@ -290,6 +310,13 @@ def main():
         "airborne_kills": airk[s],
         "longest_kill_m": round(longest[s]),
         "cash_spent": cash[s],
+        "flashes_thrown": fl_t[s],
+        "smokes_thrown": sm_t[s],
+        "molotovs_thrown": mo_t[s],
+        "he_thrown": he_t[s],
+        "decoys_thrown": de_t[s],
+        "he_damage": he_dmg[s],
+        "fire_damage": fire_dmg[s],
     } for s in by_steam]
 
     if dry:
