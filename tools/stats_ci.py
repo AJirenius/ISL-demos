@@ -6,7 +6,11 @@ KAST is computed in the same pass, same HLTV semantics as before.
 WHY. MatchZy never populates trade_kills, bomb_plants, bomb_defuses,
 knife_kills, first_kills/deaths_ct/t, flash_assists, friendlies_flashed,
 team_kills or suicides (same documented gap as KAST), and never sends
-utility_thrown / kills_with_sniper / kills_with_pistol at all. The demo has
+utility_thrown / kills_with_sniper / kills_with_pistol at all. On top of the
+dead family this pass mines the demo for flavour stats no server plugin has:
+team_damage, last_alive (rounds as the team's last one standing), blind /
+smoke / wallbang / noscope / airborne kills, longest_kill_m (max kill
+distance, metres). The demo has
 all of it. Keys MatchZy DOES track live (kills, deaths, damage,
 utility_damage, enemies_flashed, headshot_kills, mvp, multikills, 1vX) are
 deliberately not computed here — the demo pass must never fight the live
@@ -104,6 +108,12 @@ def main():
             "assister": col(d, "assister_steamid"),
             "flash":    bool(d.get("assistedflash")),
             "weapon":   wname(d.get("weapon")),
+            "blind":    bool(d.get("attackerblind")),
+            "smoke":    bool(d.get("thrusmoke")),
+            "wall":     int(d.get("penetrated") or 0) > 0,
+            "noscope":  bool(d.get("noscope")),
+            "air":      bool(d.get("attackerinair")),
+            "dist":     float(d.get("distance") or 0),
             "att_side": col(d, "attacker_team_name"),   # "CT" / "TERRORIST" at that moment
             "vic_side": col(d, "user_team_name"),
         })
@@ -120,6 +130,8 @@ def main():
     fk_ct = Z(); fk_t = Z(); fd_ct = Z(); fd_t = Z()
     fassist = Z(); tk = Z(); suicides = Z()
     plants = Z(); defuses = Z(); util = Z(); ff_flash = Z(); ef_flash = Z()
+    blindk = Z(); smokek = Z(); wallk = Z(); nsk = Z(); airk = Z()
+    tdmg = Z(); last_alive = Z(); longest = Z()
 
     def enemy_kill(r):
         a, v = r["attacker"], r["victim"]
@@ -133,6 +145,12 @@ def main():
             if r["weapon"] in PISTOLS: pistol[a] += 1
             if r["flash"] and r["assister"] in team_of and team_of[r["assister"]] != team_of[v]:
                 fassist[r["assister"]] += 1
+            if r["blind"]: blindk[a] += 1
+            if r["smoke"]: smokek[a] += 1
+            if r["wall"]:  wallk[a] += 1
+            if r["noscope"] and r["weapon"] in SNIPERS: nsk[a] += 1
+            if r["air"]:   airk[a] += 1
+            if r["dist"] > longest[a]: longest[a] = r["dist"]
             # trade: v had killed one of a's teammates within the window, same round
             if any(r2["round"] == r["round"] and r2["attacker"] == v
                    and r2["victim"] in team_of and team_of[r2["victim"]] == team_of[a]
@@ -152,6 +170,25 @@ def main():
         if not opener: continue
         (fk_ct if opener["att_side"] == "CT" else fk_t)[opener["attacker"]] += 1
         (fd_ct if opener["vic_side"] == "CT" else fd_t)[opener["victim"]] += 1
+
+    # last one standing: rounds where all four teammates died first (whether
+    # or not the player then survived the round)
+    for rnd in range(1, n + 1):
+        rr = [r for r in deaths if r["round"] == rnd and r["victim"] in team_of]
+        for sid, pl in by_steam.items():
+            mates_down = sum(1 for r in rr if r["victim"] != sid and team_of[r["victim"]] == pl["team_id"])
+            if mates_down < 4: continue
+            mine = next((r["tick"] for r in rr if r["victim"] == sid), None)
+            mate_ticks = [r["tick"] for r in rr if r["victim"] != sid and team_of[r["victim"]] == pl["team_id"]]
+            if mine is None or mine > max(mate_ticks):
+                last_alive[sid] += 1
+
+    # team damage (player_hurt: teammate on teammate, self excluded)
+    for d in evt("player_hurt"):
+        if not (1 <= round_of(int(d["tick"])) <= n): continue
+        a, v = col(d, "attacker_steamid"), col(d, "user_steamid")
+        if a in team_of and v in team_of and a != v and team_of[a] == team_of[v]:
+            tdmg[a] += int(d.get("dmg_health") or 0)
 
     # KAST — unchanged HLTV semantics
     for rnd in range(1, n + 1):
@@ -208,12 +245,15 @@ def main():
 
     print(f"match {match_id} map {map_num} — {n} rounds")
     print(f"  {'player':<16}{'kast':>5}{'tr':>4}{'fk':>4}{'fd':>4}{'pl':>4}{'df':>4}"
-          f"{'kn':>4}{'awp':>4}{'pst':>4}{'fa':>4}{'ffl':>4}{'efl*':>5}{'tk':>4}{'sui':>4}{'utl':>5}")
+          f"{'kn':>4}{'awp':>4}{'pst':>4}{'fa':>4}{'ffl':>4}{'efl*':>5}{'tk':>4}{'sui':>4}{'utl':>5}"
+          f"{'bld':>4}{'smk':>4}{'wb':>4}{'ns':>4}{'air':>4}{'la':>4}{'tdm':>5}{'lng':>5}")
     for sid, pl in sorted(by_steam.items(), key=lambda x: -kast[x[0]]):
         print(f"  {pl['alias']:<16}{kast[sid]:>5}{trades[sid]:>4}"
               f"{fk_ct[sid]+fk_t[sid]:>4}{fd_ct[sid]+fd_t[sid]:>4}"
               f"{plants[sid]:>4}{defuses[sid]:>4}{knife[sid]:>4}{sniper[sid]:>4}{pistol[sid]:>4}"
-              f"{fassist[sid]:>4}{ff_flash[sid]:>4}{ef_flash[sid]:>5}{tk[sid]:>4}{suicides[sid]:>4}{util[sid]:>5}")
+              f"{fassist[sid]:>4}{ff_flash[sid]:>4}{ef_flash[sid]:>5}{tk[sid]:>4}{suicides[sid]:>4}{util[sid]:>5}"
+              f"{blindk[sid]:>4}{smokek[sid]:>4}{wallk[sid]:>4}{nsk[sid]:>4}{airk[sid]:>4}"
+              f"{last_alive[sid]:>4}{tdmg[sid]:>5}{round(longest[sid]):>5}")
     print("  (* efl = demo-computed enemies_flashed, print-only — MatchZy owns that key)")
 
     payload = [{
@@ -232,6 +272,14 @@ def main():
         "utility_thrown": util[s],
         "kills_with_sniper": sniper[s],
         "kills_with_pistol": pistol[s],
+        "team_damage": tdmg[s],
+        "last_alive": last_alive[s],
+        "blind_kills": blindk[s],
+        "smoke_kills": smokek[s],
+        "wallbang_kills": wallk[s],
+        "noscope_kills": nsk[s],
+        "airborne_kills": airk[s],
+        "longest_kill_m": round(longest[s]),
     } for s in by_steam]
 
     if dry:
